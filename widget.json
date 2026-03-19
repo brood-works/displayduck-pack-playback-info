@@ -1,0 +1,53 @@
+{
+  "icon": "lni lnis-music",
+  "name": "Playback Info",
+  "description": "Display the currently playing media from the system.",
+  "assets": [],
+  "version": "0.1.2",
+  "widgets": [
+    {
+      "category": "media",
+      "id": "playback-info",
+      "icon": "lni lnis-music",
+      "name": "Playback Info",
+      "description": "Display the currently playing media from the system.",
+      "platform": "all",
+      "minWidth": 200,
+      "minHeight": 100,
+      "config": {
+        "autoHide": {
+          "label": "Auto-hide",
+          "subLabel": "Hide when no media is playing",
+          "type": "boolean",
+          "defaultValue": false
+        },
+        "orientation": {
+          "label": "Orientation",
+          "type": "select",
+          "options": [
+            "auto",
+            "vertical",
+            "horizontal"
+          ],
+          "defaultValue": "auto"
+        },
+        "rightAlign": {
+          "label": "Align Right",
+          "type": "boolean",
+          "defaultValue": false
+        },
+        "scrollText": {
+          "label": "Scroll Text",
+          "subLabel": "Scroll text when it overflows the widget",
+          "type": "boolean",
+          "defaultValue": false
+        },
+        "hideCover": {
+          "label": "Hide Cover",
+          "type": "boolean",
+          "defaultValue": false
+        }
+      }
+    }
+  ]
+}

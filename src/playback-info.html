@@ -1,0 +1,57 @@
+{{#if showWidget()}}
+  <div class="{{ playerClass() }}">
+    <div data-role="now-playing" class="now-playing">
+      {{#if !hideCover()}}
+        <div class="cover-shell">
+          {{#if artworkSource()}}
+            <div class="backdrop">
+              <img src="{{ artworkSource() }}" alt="Album Cover">
+            </div>
+          {{/if}}
+          <div class="cover">
+            {{#if artworkSource()}}
+              <img class="cover-image" src="{{ artworkSource() }}" alt="Album Cover">
+            {{/if}}
+            {{#if !artworkSource()}}
+              <div class="no-cover">
+                <i class="lni lnis-volume-high"></i>
+              </div>
+            {{/if}}
+          </div>
+        </div>
+      {{/if}}
+
+      <div class="details">
+        {{#if hasMetadata()}}
+          <div data-role="artist" class="artist">
+            <span>{{ artistText() }}</span>
+          </div>
+          <div data-role="title" class="title">
+            <span>{{ titleText() }}</span>
+          </div>
+          <div class="album">{{ albumText() }}</div>
+
+          {{#if showLiveIndicator()}}
+            <div class="live">Live <span></span></div>
+          {{/if}}
+
+          {{#if showHorizontalTrack()}}
+            <div class="track inline-track">
+              <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>
+            </div>
+          {{/if}}
+        {{/if}}
+
+        {{#if !hasMetadata()}}
+          <div class="title no-metadata"><span>Nothing playing</span></div>
+        {{/if}}
+      </div>
+    </div>
+
+    {{#if showVerticalTrack()}}
+      <div class="track block-track">
+        <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>
+      </div>
+    {{/if}}
+  </div>
+{{/if}}
