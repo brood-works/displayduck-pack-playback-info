@@ -1,27 +1,18 @@
 {{#if showWidget()}}
   <div class="{{ playerClass() }}">
     <div data-role="now-playing" class="now-playing">
-      {{#if !hideCover()}}
+      {{#if !hideCover() && artworkSource() }}
         <div class="cover-shell">
-          {{#if artworkSource()}}
-            <div class="backdrop">
-              <img src="{{ artworkSource() }}" alt="Album Cover">
-            </div>
-          {{/if}}
+          <div class="backdrop">
+            <img src="{{ artworkSource() }}" alt="Album Cover">
+          </div>
           <div class="cover">
-            {{#if artworkSource()}}
-              <img class="cover-image" src="{{ artworkSource() }}" alt="Album Cover">
-            {{/if}}
-            {{#if !artworkSource()}}
-              <div class="no-cover">
-                <i class="lni lnis-volume-high"></i>
-              </div>
-            {{/if}}
+            <img class="cover-image" src="{{ artworkSource() }}" alt="Album Cover">
           </div>
         </div>
       {{/if}}
 
-      <div class="details">
+      <div class="details  {{#if showShadows()}}shadows{{/if}}">
         {{#if hasMetadata()}}
           <div data-role="artist" class="artist">
             <span>{{ artistText() }}</span>

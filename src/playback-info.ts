@@ -160,6 +160,10 @@ export class DisplayDuckWidget {
     return Math.max(0, Math.min(100, Math.round(rawPercent * 100) / 100));
   }
 
+  public showShadows(): boolean {
+    return this.booleanConfig('shadow', false);
+  }
+
   private media(): SystemNowPlayingMedia {
     return this.mediaState();
   }

@@ -1,376 +1,613 @@
-const P = /* @__PURE__ */ new Map(), R = (e) => String(e ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;"), W = (e) => {
-  const t = P.get(e);
-  if (t)
-    return t;
-  const a = e.replace(/\bthis\b/g, "__item"), i = new Function("scope", `with (scope) { return (${a}); }`);
-  return P.set(e, i), i;
-}, f = (e, t) => {
+const expressionCache = /* @__PURE__ */ new Map();
+const escapeHtml = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+const compileExpression = (expression) => {
+  const cached = expressionCache.get(expression);
+  if (cached) {
+    return cached;
+  }
+  const transformed = expression.replace(/\bthis\b/g, "__item");
+  const fn = new Function("scope", `with (scope) { return (${transformed}); }`);
+  expressionCache.set(expression, fn);
+  return fn;
+};
+const evaluate = (expression, scope) => {
   try {
-    return W(e)(t);
+    return compileExpression(expression)(scope);
   } catch {
     return "";
   }
-}, g = (e, t = 0, a) => {
-  const i = [];
-  let r = t;
-  for (; r < e.length; ) {
-    const n = e.indexOf("{{", r);
-    if (n === -1)
-      return i.push({ type: "text", value: e.slice(r) }), { nodes: i, index: e.length };
-    n > r && i.push({ type: "text", value: e.slice(r, n) });
-    const o = e.indexOf("}}", n + 2);
-    if (o === -1)
-      return i.push({ type: "text", value: e.slice(n) }), { nodes: i, index: e.length };
-    const s = e.slice(n + 2, o).trim();
-    if (r = o + 2, s === "/if" || s === "/each") {
-      if (a === s)
-        return { nodes: i, index: r };
-      i.push({ type: "text", value: `{{${s}}}` });
-      continue;
-    }
-    if (s.startsWith("#if ")) {
-      const l = g(e, r, "/if");
-      i.push({
-        type: "if",
-        condition: s.slice(4).trim(),
-        children: l.nodes
-      }), r = l.index;
-      continue;
-    }
-    if (s.startsWith("#each ")) {
-      const l = g(e, r, "/each");
-      i.push({
-        type: "each",
-        source: s.slice(6).trim(),
-        children: l.nodes
-      }), r = l.index;
-      continue;
-    }
-    i.push({ type: "expr", value: s });
-  }
-  return { nodes: i, index: r };
-}, b = (e, t) => {
-  let a = "";
-  for (const i of e) {
-    if (i.type === "text") {
-      a += i.value;
-      continue;
-    }
-    if (i.type === "expr") {
-      a += R(f(i.value, t));
-      continue;
-    }
-    if (i.type === "if") {
-      f(i.condition, t) && (a += b(i.children, t));
-      continue;
-    }
-    const r = f(i.source, t);
-    if (Array.isArray(r))
-      for (const n of r) {
-        const o = Object.create(t);
-        o.__item = n, a += b(i.children, o);
-      }
-  }
-  return a;
-}, D = (e) => {
-  const t = g(e).nodes;
-  return (a) => b(t, a);
 };
-function z(e, t = !1) {
-  return window.__TAURI_INTERNALS__.transformCallback(e, t);
+const parseNodes = (template2, from = 0, stopAt) => {
+  const nodes = [];
+  let index = from;
+  while (index < template2.length) {
+    const start = template2.indexOf("{{", index);
+    if (start === -1) {
+      nodes.push({ type: "text", value: template2.slice(index) });
+      return { nodes, index: template2.length };
+    }
+    if (start > index) {
+      nodes.push({ type: "text", value: template2.slice(index, start) });
+    }
+    const close = template2.indexOf("}}", start + 2);
+    if (close === -1) {
+      nodes.push({ type: "text", value: template2.slice(start) });
+      return { nodes, index: template2.length };
+    }
+    const token = template2.slice(start + 2, close).trim();
+    index = close + 2;
+    if (token === "/if" || token === "/each") {
+      if (stopAt === token) {
+        return { nodes, index };
+      }
+      nodes.push({ type: "text", value: `{{${token}}}` });
+      continue;
+    }
+    if (token.startsWith("#if ")) {
+      const child = parseNodes(template2, index, "/if");
+      nodes.push({
+        type: "if",
+        condition: token.slice(4).trim(),
+        children: child.nodes
+      });
+      index = child.index;
+      continue;
+    }
+    if (token.startsWith("#each ")) {
+      const child = parseNodes(template2, index, "/each");
+      nodes.push({
+        type: "each",
+        source: token.slice(6).trim(),
+        children: child.nodes
+      });
+      index = child.index;
+      continue;
+    }
+    nodes.push({ type: "expr", value: token });
+  }
+  return { nodes, index };
+};
+const renderNodes = (nodes, scope) => {
+  let output = "";
+  for (const node of nodes) {
+    if (node.type === "text") {
+      output += node.value;
+      continue;
+    }
+    if (node.type === "expr") {
+      output += escapeHtml(evaluate(node.value, scope));
+      continue;
+    }
+    if (node.type === "if") {
+      if (Boolean(evaluate(node.condition, scope))) {
+        output += renderNodes(node.children, scope);
+      }
+      continue;
+    }
+    const items = evaluate(node.source, scope);
+    if (!Array.isArray(items)) {
+      continue;
+    }
+    for (const item of items) {
+      const childScope = Object.create(scope);
+      childScope.__item = item;
+      output += renderNodes(node.children, childScope);
+    }
+  }
+  return output;
+};
+const createTemplateRenderer = (template2) => {
+  const parsed = parseNodes(template2).nodes;
+  return (scope) => renderNodes(parsed, scope);
+};
+typeof SuppressedError === "function" ? SuppressedError : function(error, suppressed, message) {
+  var e = new Error(message);
+  return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
+};
+function transformCallback(callback, once = false) {
+  return window.__TAURI_INTERNALS__.transformCallback(callback, once);
 }
-async function w(e, t = {}, a) {
-  return window.__TAURI_INTERNALS__.invoke(e, t, a);
+async function invoke(cmd, args = {}, options) {
+  return window.__TAURI_INTERNALS__.invoke(cmd, args, options);
 }
-function N(e, t = "asset") {
-  return window.__TAURI_INTERNALS__.convertFileSrc(e, t);
+function convertFileSrc(filePath, protocol = "asset") {
+  return window.__TAURI_INTERNALS__.convertFileSrc(filePath, protocol);
 }
-var x;
-(function(e) {
-  e.WINDOW_RESIZED = "tauri://resize", e.WINDOW_MOVED = "tauri://move", e.WINDOW_CLOSE_REQUESTED = "tauri://close-requested", e.WINDOW_DESTROYED = "tauri://destroyed", e.WINDOW_FOCUS = "tauri://focus", e.WINDOW_BLUR = "tauri://blur", e.WINDOW_SCALE_FACTOR_CHANGED = "tauri://scale-change", e.WINDOW_THEME_CHANGED = "tauri://theme-changed", e.WINDOW_CREATED = "tauri://window-created", e.WEBVIEW_CREATED = "tauri://webview-created", e.DRAG_ENTER = "tauri://drag-enter", e.DRAG_OVER = "tauri://drag-over", e.DRAG_DROP = "tauri://drag-drop", e.DRAG_LEAVE = "tauri://drag-leave";
-})(x || (x = {}));
-async function O(e, t) {
-  window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(e, t), await w("plugin:event|unlisten", {
-    event: e,
-    eventId: t
+var TauriEvent;
+(function(TauriEvent2) {
+  TauriEvent2["WINDOW_RESIZED"] = "tauri://resize";
+  TauriEvent2["WINDOW_MOVED"] = "tauri://move";
+  TauriEvent2["WINDOW_CLOSE_REQUESTED"] = "tauri://close-requested";
+  TauriEvent2["WINDOW_DESTROYED"] = "tauri://destroyed";
+  TauriEvent2["WINDOW_FOCUS"] = "tauri://focus";
+  TauriEvent2["WINDOW_BLUR"] = "tauri://blur";
+  TauriEvent2["WINDOW_SCALE_FACTOR_CHANGED"] = "tauri://scale-change";
+  TauriEvent2["WINDOW_THEME_CHANGED"] = "tauri://theme-changed";
+  TauriEvent2["WINDOW_CREATED"] = "tauri://window-created";
+  TauriEvent2["WEBVIEW_CREATED"] = "tauri://webview-created";
+  TauriEvent2["DRAG_ENTER"] = "tauri://drag-enter";
+  TauriEvent2["DRAG_OVER"] = "tauri://drag-over";
+  TauriEvent2["DRAG_DROP"] = "tauri://drag-drop";
+  TauriEvent2["DRAG_LEAVE"] = "tauri://drag-leave";
+})(TauriEvent || (TauriEvent = {}));
+async function _unlisten(event, eventId) {
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId);
+  await invoke("plugin:event|unlisten", {
+    event,
+    eventId
   });
 }
-async function E(e, t, a) {
-  var i;
-  const r = (i = void 0) !== null && i !== void 0 ? i : { kind: "Any" };
-  return w("plugin:event|listen", {
-    event: e,
-    target: r,
-    handler: z(t)
-  }).then((n) => async () => O(e, n));
+async function listen(event, handler, options) {
+  var _a;
+  const target = (_a = void 0) !== null && _a !== void 0 ? _a : { kind: "Any" };
+  return invoke("plugin:event|listen", {
+    event,
+    target,
+    handler: transformCallback(handler)
+  }).then((eventId) => {
+    return async () => _unlisten(event, eventId);
+  });
 }
-const C = (e) => {
-  if (typeof e != "function")
-    return !1;
-  const t = e;
-  return t._isSignal === !0 && typeof t.set == "function" && typeof t.subscribe == "function";
-}, S = (e) => {
-  let t = e;
-  const a = /* @__PURE__ */ new Set(), i = (() => t);
-  return i._isSignal = !0, i.set = (r) => {
-    t = r;
-    for (const n of a)
-      n(t);
-  }, i.update = (r) => {
-    i.set(r(t));
-  }, i.subscribe = (r) => (a.add(r), () => a.delete(r)), i;
-}, U = (e, t) => {
-  const a = [];
-  for (const i of Object.keys(e)) {
-    const r = e[i];
-    C(r) && a.push(r.subscribe(() => t()));
+const isSignal = (value) => {
+  if (typeof value !== "function") {
+    return false;
   }
-  return () => {
-    for (const i of a)
-      i();
+  const candidate = value;
+  return candidate._isSignal === true && typeof candidate.set === "function" && typeof candidate.subscribe === "function";
+};
+const signal = (initialValue) => {
+  let current = initialValue;
+  const subscribers = /* @__PURE__ */ new Set();
+  const read = (() => current);
+  read._isSignal = true;
+  read.set = (value) => {
+    current = value;
+    for (const subscriber of subscribers) {
+      subscriber(current);
+    }
   };
-}, H = (e, t) => new Proxy(
-  { payload: t },
-  {
-    get(a, i) {
-      if (typeof i != "string")
-        return;
-      if (i in a)
-        return a[i];
-      const r = e[i];
-      return typeof r == "function" ? r.bind(e) : r;
-    },
-    has(a, i) {
-      return typeof i != "string" ? !1 : i in a || i in e;
+  read.update = (updater) => {
+    read.set(updater(current));
+  };
+  read.subscribe = (subscriber) => {
+    subscribers.add(subscriber);
+    return () => subscribers.delete(subscriber);
+  };
+  return read;
+};
+const bindSignals = (source, onChange) => {
+  const unsubscribers = [];
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (isSignal(value)) {
+      unsubscribers.push(value.subscribe(() => onChange()));
     }
   }
-), $ = ["src", "href", "poster"], F = "{{pack-install-path}}/", A = "{{ASSETS}}", j = (e) => {
-  const t = e.trim();
-  return t.length === 0 || t.startsWith("data:") || t.startsWith("blob:") || t.startsWith("http://") || t.startsWith("https://") || t.startsWith("file:") || t.startsWith("asset:") || t.startsWith("mailto:") || t.startsWith("tel:") || t.startsWith("javascript:") || t.startsWith("//") || t.startsWith("/") || t.startsWith("#");
-}, B = (e) => {
-  const t = e.trim();
-  if (!t)
+  return () => {
+    for (const unsubscribe of unsubscribers) {
+      unsubscribe();
+    }
+  };
+};
+const createScope = (instance, payload) => {
+  return new Proxy(
+    { payload },
+    {
+      get(target, property) {
+        if (typeof property !== "string") {
+          return void 0;
+        }
+        if (property in target) {
+          return target[property];
+        }
+        const value = instance[property];
+        if (typeof value === "function") {
+          return value.bind(instance);
+        }
+        return value;
+      },
+      has(target, property) {
+        if (typeof property !== "string") {
+          return false;
+        }
+        return property in target || property in instance;
+      }
+    }
+  );
+};
+const RELATIVE_URL_ATTRIBUTES = ["src", "href", "poster"];
+const PACK_INSTALL_PATH_PLACEHOLDER = "{{pack-install-path}}/";
+const ASSETS_PLACEHOLDER = "{{ASSETS}}";
+const isExternalAssetUrl = (value) => {
+  const trimmed = value.trim();
+  return trimmed.length === 0 || trimmed.startsWith("data:") || trimmed.startsWith("blob:") || trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("file:") || trimmed.startsWith("asset:") || trimmed.startsWith("mailto:") || trimmed.startsWith("tel:") || trimmed.startsWith("javascript:") || trimmed.startsWith("//") || trimmed.startsWith("/") || trimmed.startsWith("#");
+};
+const extractWidgetRelativePath = (value) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
     return null;
-  if (!j(t))
-    return t.replace(/^\.\/+/, "").replace(/^\/+/, "");
-  if (t.startsWith("http://") || t.startsWith("https://"))
+  }
+  if (!isExternalAssetUrl(trimmed)) {
+    return trimmed.replace(/^\.\/+/, "").replace(/^\/+/, "");
+  }
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
     try {
-      const a = new URL(t);
-      if (a.origin === window.location.origin)
-        return `${a.pathname}${a.search}${a.hash}`.replace(/^\/+/, "");
+      const url = new URL(trimmed);
+      if (url.origin === window.location.origin) {
+        return `${url.pathname}${url.search}${url.hash}`.replace(/^\/+/, "");
+      }
     } catch {
       return null;
     }
+  }
   return null;
-}, q = (e, t) => {
-  const a = e.replaceAll("\\", "/").replace(/\/+$/, ""), i = `${a}/${t.trim()}`, r = i.split("/"), n = [];
-  for (const o of r) {
-    if (!o || o === ".") {
-      n.length === 0 && i.startsWith("/") && n.push("");
+};
+const normalizeJoinedAssetPath = (widgetDirectory, relativePath) => {
+  const normalizedBase = widgetDirectory.replaceAll("\\", "/").replace(/\/+$/, "");
+  const combined = `${normalizedBase}/${relativePath.trim()}`;
+  const segments = combined.split("/");
+  const resolved = [];
+  for (const segment of segments) {
+    if (!segment || segment === ".") {
+      if (resolved.length === 0 && combined.startsWith("/")) {
+        resolved.push("");
+      }
       continue;
     }
-    if (o === "..") {
-      (n.length > 1 || n.length === 1 && n[0] !== "") && n.pop();
+    if (segment === "..") {
+      if (resolved.length > 1 || resolved.length === 1 && resolved[0] !== "") {
+        resolved.pop();
+      }
       continue;
     }
-    n.push(o);
+    resolved.push(segment);
   }
-  return n.join("/") || a;
-}, y = (e, t) => {
-  const a = B(t);
-  if (!e || !a)
-    return t;
+  return resolved.join("/") || normalizedBase;
+};
+const resolveAssetUrl = (widgetDirectory, value) => {
+  const relativePath = extractWidgetRelativePath(value);
+  if (!widgetDirectory || !relativePath) {
+    return value;
+  }
   try {
-    return N(q(e, a));
+    return convertFileSrc(normalizeJoinedAssetPath(widgetDirectory, relativePath));
   } catch {
-    return t;
-  }
-}, V = (e) => {
-  const t = e.trim().replaceAll("\\", "/").replace(/\/+$/, "");
-  if (!t)
-    return "";
-  try {
-    return N(t);
-  } catch {
-    return t;
-  }
-}, G = (e, t) => e.split(",").map((a) => {
-  const i = a.trim();
-  if (!i)
-    return i;
-  const [r, n] = i.split(/\s+/, 2), o = y(t, r);
-  return n ? `${o} ${n}` : o;
-}).join(", "), K = (e, t) => e.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (a, i, r) => {
-  const n = y(t, r);
-  return n === r ? a : `url("${n}")`;
-}), v = (e, t) => {
-  for (const r of $) {
-    const n = e.getAttribute(r);
-    if (!n)
-      continue;
-    const o = y(t, n);
-    o !== n && e.setAttribute(r, o);
-  }
-  const a = e.getAttribute("srcset");
-  if (a) {
-    const r = G(a, t);
-    r !== a && e.setAttribute("srcset", r);
-  }
-  const i = e.getAttribute("style");
-  if (i) {
-    const r = K(i, t);
-    r !== i && e.setAttribute("style", r);
-  }
-}, I = (e, t) => {
-  if (t) {
-    e instanceof Element && v(e, t);
-    for (const a of Array.from(e.querySelectorAll("*")))
-      v(a, t);
-  }
-}, M = (e, t) => {
-  if (!t)
-    return e;
-  let a = e;
-  const i = V(t);
-  return i && a.includes(A) && (a = a.replaceAll(A, i)), a.includes(F) ? a.replace(/\{\{pack-install-path\}\}\/([^"')\s]+)/g, (r, n) => y(t, n)) : a;
-}, Y = (e, t) => class {
-  constructor({
-    mount: i,
-    payload: r,
-    setLoading: n
-  }) {
-    this.cleanups = [], this.widgetDirectory = "", this.mount = i, this.payload = r ?? {}, this.setLoading = typeof n == "function" ? n : (() => {
-    }), this.assetObserver = new MutationObserver((o) => {
-      if (this.widgetDirectory)
-        for (const s of o) {
-          if (s.type === "attributes" && s.target instanceof Element) {
-            v(s.target, this.widgetDirectory);
-            continue;
-          }
-          for (const l of Array.from(s.addedNodes))
-            l instanceof Element && I(l, this.widgetDirectory);
-        }
-    }), this.logic = new e({
-      mount: i,
-      payload: this.payload,
-      setLoading: (o) => this.setLoading(!!o),
-      on: (o, s, l) => this.on(o, s, l)
-    }), this.cleanupSignalSubscriptions = U(this.logic, () => this.render()), this.assetObserver.observe(this.mount, {
-      subtree: !0,
-      childList: !0,
-      attributes: !0,
-      attributeFilter: ["src", "href", "poster", "srcset", "style"]
-    });
-  }
-  onInit() {
-    this.render(), this.logic.onInit?.();
-  }
-  onUpdate(i) {
-    this.payload = i ?? {}, this.logic.onUpdate?.(this.payload), this.render();
-  }
-  onDestroy() {
-    for (this.cleanupSignalSubscriptions(); this.cleanups.length > 0; )
-      this.cleanups.pop()?.();
-    this.assetObserver.disconnect(), this.logic.onDestroy?.(), this.mount.innerHTML = "";
-  }
-  render() {
-    const i = H(this.logic, this.payload);
-    this.widgetDirectory = String(
-      this.payload?.widgetDirectory ?? this.payload?.directory ?? ""
-    ).trim();
-    const r = M(t.template, this.widgetDirectory), n = M(t.styles, this.widgetDirectory), s = D(r)(i);
-    this.mount.innerHTML = `<style>${n}</style>${s}`, this.mount.setAttribute("data-displayduck-render-empty", s.trim().length === 0 ? "true" : "false"), I(this.mount, this.widgetDirectory), this.logic.afterRender?.();
-  }
-  on(i, r, n) {
-    const o = (l) => {
-      const c = l.target?.closest(r);
-      !c || !this.mount.contains(c) || n(l, c);
-    };
-    this.mount.addEventListener(i, o);
-    const s = () => this.mount.removeEventListener(i, o);
-    return this.cleanups.push(s), s;
+    return value;
   }
 };
-var d;
-(function(e) {
-  e.Playing = "playing", e.Paused = "paused", e.Stopped = "stopped";
-})(d || (d = {}));
-var k;
-(function(e) {
-  e.None = "none", e.Track = "track", e.List = "list";
-})(k || (k = {}));
-var T;
-(function(e) {
-  e.Play = "play", e.Pause = "pause", e.PlayPause = "playPause", e.Stop = "stop", e.Next = "next", e.Previous = "previous", e.FastForward = "fastForward", e.Rewind = "rewind", e.SeekTo = "seekTo", e.SetPosition = "setPosition", e.SetPlaybackRate = "setPlaybackRate";
-})(T || (T = {}));
-const J = "system-now-playing-updated", Q = async () => {
-  const e = await w("controller_get_system_now_playing");
-  return _(e);
-}, Z = async (e) => E(J, (t) => {
-  e(_(t.payload));
-}), _ = (e) => {
-  if (!e)
+const resolveAssetsBaseUrl = (widgetDirectory) => {
+  const normalizedDirectory = widgetDirectory.trim().replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!normalizedDirectory) {
+    return "";
+  }
+  try {
+    return convertFileSrc(normalizedDirectory);
+  } catch {
+    return normalizedDirectory;
+  }
+};
+const rewriteSrcset = (value, widgetDirectory) => {
+  return value.split(",").map((entry) => {
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      return trimmed;
+    }
+    const [url, descriptor] = trimmed.split(/\s+/, 2);
+    const nextUrl = resolveAssetUrl(widgetDirectory, url);
+    return descriptor ? `${nextUrl} ${descriptor}` : nextUrl;
+  }).join(", ");
+};
+const rewriteInlineStyleUrls = (value, widgetDirectory) => {
+  return value.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (full, quote, urlValue) => {
+    const nextUrl = resolveAssetUrl(widgetDirectory, urlValue);
+    if (nextUrl === urlValue) {
+      return full;
+    }
+    return `url("${nextUrl}")`;
+  });
+};
+const rewriteElementAssetUrls = (element, widgetDirectory) => {
+  for (const attribute of RELATIVE_URL_ATTRIBUTES) {
+    const currentValue = element.getAttribute(attribute);
+    if (!currentValue) {
+      continue;
+    }
+    const nextValue = resolveAssetUrl(widgetDirectory, currentValue);
+    if (nextValue !== currentValue) {
+      element.setAttribute(attribute, nextValue);
+    }
+  }
+  const currentSrcset = element.getAttribute("srcset");
+  if (currentSrcset) {
+    const nextSrcset = rewriteSrcset(currentSrcset, widgetDirectory);
+    if (nextSrcset !== currentSrcset) {
+      element.setAttribute("srcset", nextSrcset);
+    }
+  }
+  const currentStyle = element.getAttribute("style");
+  if (currentStyle) {
+    const nextStyle = rewriteInlineStyleUrls(currentStyle, widgetDirectory);
+    if (nextStyle !== currentStyle) {
+      element.setAttribute("style", nextStyle);
+    }
+  }
+};
+const rewriteTreeAssetUrls = (root, widgetDirectory) => {
+  if (!widgetDirectory) {
+    return;
+  }
+  if (root instanceof Element) {
+    rewriteElementAssetUrls(root, widgetDirectory);
+  }
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    rewriteElementAssetUrls(element, widgetDirectory);
+  }
+};
+const rewriteInstallPathPlaceholders = (input, widgetDirectory) => {
+  if (!widgetDirectory) {
+    return input;
+  }
+  let output = input;
+  const assetsBaseUrl = resolveAssetsBaseUrl(widgetDirectory);
+  if (assetsBaseUrl && output.includes(ASSETS_PLACEHOLDER)) {
+    output = output.replaceAll(ASSETS_PLACEHOLDER, assetsBaseUrl);
+  }
+  if (!output.includes(PACK_INSTALL_PATH_PLACEHOLDER)) {
+    return output;
+  }
+  return output.replace(/\{\{pack-install-path\}\}\/([^"')\s]+)/g, (full, relativePath) => {
+    return resolveAssetUrl(widgetDirectory, relativePath);
+  });
+};
+const createWidgetClass = (WidgetImpl, options) => {
+  return class RuntimeWidget {
+    constructor({
+      mount,
+      payload,
+      setLoading
+    }) {
+      this.cleanups = [];
+      this.widgetDirectory = "";
+      this.mount = mount;
+      this.payload = payload ?? {};
+      this.setLoading = typeof setLoading === "function" ? setLoading : (() => {
+      });
+      this.assetObserver = new MutationObserver((mutations) => {
+        if (!this.widgetDirectory) {
+          return;
+        }
+        for (const mutation of mutations) {
+          if (mutation.type === "attributes" && mutation.target instanceof Element) {
+            rewriteElementAssetUrls(mutation.target, this.widgetDirectory);
+            continue;
+          }
+          for (const node of Array.from(mutation.addedNodes)) {
+            if (node instanceof Element) {
+              rewriteTreeAssetUrls(node, this.widgetDirectory);
+            }
+          }
+        }
+      });
+      this.logic = new WidgetImpl({
+        mount,
+        payload: this.payload,
+        setLoading: (loading) => this.setLoading(Boolean(loading)),
+        on: (eventName, selector, handler) => this.on(eventName, selector, handler)
+      });
+      this.cleanupSignalSubscriptions = bindSignals(this.logic, () => this.render());
+      this.assetObserver.observe(this.mount, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["src", "href", "poster", "srcset", "style"]
+      });
+    }
+    onInit() {
+      this.render();
+      this.logic.onInit?.();
+    }
+    onUpdate(payload) {
+      this.payload = payload ?? {};
+      this.logic.onUpdate?.(this.payload);
+      this.render();
+    }
+    onDestroy() {
+      this.cleanupSignalSubscriptions();
+      while (this.cleanups.length > 0) {
+        const cleanup = this.cleanups.pop();
+        cleanup?.();
+      }
+      this.assetObserver.disconnect();
+      this.logic.onDestroy?.();
+      this.mount.innerHTML = "";
+    }
+    render() {
+      const scope = createScope(this.logic, this.payload);
+      this.widgetDirectory = String(
+        this.payload?.widgetDirectory ?? this.payload?.directory ?? ""
+      ).trim();
+      const finalTemplate = rewriteInstallPathPlaceholders(options.template, this.widgetDirectory);
+      const finalStyles = rewriteInstallPathPlaceholders(options.styles, this.widgetDirectory);
+      const renderTemplate = createTemplateRenderer(finalTemplate);
+      const html = renderTemplate(scope);
+      this.mount.innerHTML = `<style>${finalStyles}</style>${html}`;
+      this.mount.setAttribute("data-displayduck-render-empty", html.trim().length === 0 ? "true" : "false");
+      rewriteTreeAssetUrls(this.mount, this.widgetDirectory);
+      this.logic.afterRender?.();
+    }
+    on(eventName, selector, handler) {
+      const listener = (event) => {
+        const target = event.target;
+        const matched = target?.closest(selector);
+        if (!matched || !this.mount.contains(matched)) {
+          return;
+        }
+        handler(event, matched);
+      };
+      this.mount.addEventListener(eventName, listener);
+      const cleanup = () => this.mount.removeEventListener(eventName, listener);
+      this.cleanups.push(cleanup);
+      return cleanup;
+    }
+  };
+};
+var PlaybackStatus;
+(function(PlaybackStatus2) {
+  PlaybackStatus2["Playing"] = "playing";
+  PlaybackStatus2["Paused"] = "paused";
+  PlaybackStatus2["Stopped"] = "stopped";
+})(PlaybackStatus || (PlaybackStatus = {}));
+var RepeatMode;
+(function(RepeatMode2) {
+  RepeatMode2["None"] = "none";
+  RepeatMode2["Track"] = "track";
+  RepeatMode2["List"] = "list";
+})(RepeatMode || (RepeatMode = {}));
+var MediaControlEventType;
+(function(MediaControlEventType2) {
+  MediaControlEventType2["Play"] = "play";
+  MediaControlEventType2["Pause"] = "pause";
+  MediaControlEventType2["PlayPause"] = "playPause";
+  MediaControlEventType2["Stop"] = "stop";
+  MediaControlEventType2["Next"] = "next";
+  MediaControlEventType2["Previous"] = "previous";
+  MediaControlEventType2["FastForward"] = "fastForward";
+  MediaControlEventType2["Rewind"] = "rewind";
+  MediaControlEventType2["SeekTo"] = "seekTo";
+  MediaControlEventType2["SetPosition"] = "setPosition";
+  MediaControlEventType2["SetPlaybackRate"] = "setPlaybackRate";
+})(MediaControlEventType || (MediaControlEventType = {}));
+const NOW_PLAYING_EVENT = "system-now-playing-updated";
+const getSystemNowPlaying = async () => {
+  const payload = await invoke("controller_get_system_now_playing");
+  return normalizeSystemNowPlaying(payload);
+};
+const subscribeToSystemNowPlaying = async (handler) => {
+  return listen(NOW_PLAYING_EVENT, (event) => {
+    handler(normalizeSystemNowPlaying(event.payload));
+  });
+};
+const normalizeSystemNowPlaying = (input) => {
+  if (!input) {
     return {
       metadata: null,
       playback: null
     };
-  const t = Number.isFinite(e.duration) ? e.duration ?? void 0 : void 0, a = X(e.status), i = {
-    title: e.title,
-    artist: typeof e.artist == "string" ? e.artist : void 0,
-    album: typeof e.album == "string" ? e.album : void 0,
-    artworkUrl: typeof e.artworkUrl == "string" ? e.artworkUrl : void 0,
-    artworkData: typeof e.artworkData == "string" ? e.artworkData : void 0,
-    duration: t
-  }, r = Number.isFinite(e.playbackRate) && e.playbackRate != null ? e.playbackRate : a === d.Playing ? 1 : 0, n = !Number.isFinite(t) || (t ?? 0) <= 0, o = e.canSeek === !1, s = e.isLivestream === !0, l = /(chrome|msedge|firefox|brave|opera|vivaldi|arc)/i.test(e.app ?? ""), u = /\blive\b|🔴|\[live\]|\(live\)/i.test(e.title ?? ""), c = (t ?? 0) >= 10800, h = l && a === d.Playing && (u || c);
+  }
+  const duration = Number.isFinite(input.duration) ? input.duration ?? void 0 : void 0;
+  const status = mapPlaybackStatus(input.status);
+  const metadata = {
+    title: input.title,
+    artist: typeof input.artist === "string" ? input.artist : void 0,
+    album: typeof input.album === "string" ? input.album : void 0,
+    artworkUrl: typeof input.artworkUrl === "string" ? input.artworkUrl : void 0,
+    artworkData: typeof input.artworkData === "string" ? input.artworkData : void 0,
+    duration
+  };
+  const playbackRate = Number.isFinite(input.playbackRate) && input.playbackRate != null ? input.playbackRate : status === PlaybackStatus.Playing ? 1 : 0;
+  const hasNoTrackLength = !Number.isFinite(duration) || (duration ?? 0) <= 0;
+  const cannotSeek = input.canSeek === false;
+  const hasLivestreamHint = input.isLivestream === true;
+  const isBrowserSource = /(chrome|msedge|firefox|brave|opera|vivaldi|arc)/i.test(input.app ?? "");
+  const hasLiveMarker = /\blive\b|🔴|\[live\]|\(live\)/i.test(input.title ?? "");
+  const hasVeryLongDuration = (duration ?? 0) >= 3 * 60 * 60;
+  const likelyBrowserLivestream = isBrowserSource && status === PlaybackStatus.Playing && (hasLiveMarker || hasVeryLongDuration);
   return {
-    app: typeof e.app == "string" ? e.app : void 0,
-    metadata: i,
+    app: typeof input.app === "string" ? input.app : void 0,
+    metadata,
     playback: {
-      status: a,
-      position: Number.isFinite(e.elapsedTime) && e.elapsedTime != null ? e.elapsedTime : 0,
-      shuffle: !1,
-      repeatMode: k.None,
-      playbackRate: r,
-      isLivestream: s || n || o || h,
-      canNext: e.canNext ?? void 0,
-      canPrevious: e.canPrevious ?? void 0,
-      canPlay: e.canPlay ?? void 0,
-      canPause: e.canPause ?? void 0,
-      canSeek: e.canSeek ?? void 0
+      status,
+      position: Number.isFinite(input.elapsedTime) && input.elapsedTime != null ? input.elapsedTime : 0,
+      shuffle: false,
+      repeatMode: RepeatMode.None,
+      playbackRate,
+      isLivestream: hasLivestreamHint || hasNoTrackLength || cannotSeek || likelyBrowserLivestream,
+      canNext: input.canNext ?? void 0,
+      canPrevious: input.canPrevious ?? void 0,
+      canPlay: input.canPlay ?? void 0,
+      canPause: input.canPause ?? void 0,
+      canSeek: input.canSeek ?? void 0
     }
   };
-}, X = (e) => {
-  switch ((e ?? "").toLowerCase()) {
+};
+const mapPlaybackStatus = (status) => {
+  switch ((status ?? "").toLowerCase()) {
     case "playing":
-      return d.Playing;
+      return PlaybackStatus.Playing;
     case "stopped":
-      return d.Stopped;
+      return PlaybackStatus.Stopped;
+    case "paused":
     default:
-      return d.Paused;
+      return PlaybackStatus.Paused;
   }
-}, m = () => ({
+};
+const createEmptyMedia = () => ({
   metadata: null,
   playback: null
-}), p = (e) => ({
-  app: e.app,
-  metadata: e.metadata ? { ...e.metadata } : null,
-  playback: e.playback ? { ...e.playback } : null
 });
-let tt = class {
-  constructor(t) {
-    this.ctx = t, this.currentMedia = m(), this.unsubscribeNowPlaying = null, this.resizeObserver = null, this.tickerId = null, this.animationTimeoutId = null, this.inactiveHideTimerId = null, this.pendingInactiveMedia = null, this.lastNowPlayingKey = "", this.lastTickAt = 0, this.playbackAnchorAtMs = 0, this.playbackAnchorPosition = 0, this.lastMonotonicPosition = 0, this.pendingNowPlayingAnimation = !1, this.inactiveHideDelayMs = 5e3, this.verticalLayoutTolerancePx = 2, this.mediaState = S(m()), this.playerStyleClassState = S("horizontal-player"), this.payload = t.payload ?? {};
+const cloneMedia = (media) => ({
+  app: media.app,
+  metadata: media.metadata ? { ...media.metadata } : null,
+  playback: media.playback ? { ...media.playback } : null
+});
+let DisplayDuckWidget$1 = class DisplayDuckWidget {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.currentMedia = createEmptyMedia();
+    this.unsubscribeNowPlaying = null;
+    this.resizeObserver = null;
+    this.tickerId = null;
+    this.animationTimeoutId = null;
+    this.inactiveHideTimerId = null;
+    this.pendingInactiveMedia = null;
+    this.lastNowPlayingKey = "";
+    this.lastTickAt = 0;
+    this.playbackAnchorAtMs = 0;
+    this.playbackAnchorPosition = 0;
+    this.lastMonotonicPosition = 0;
+    this.pendingNowPlayingAnimation = false;
+    this.inactiveHideDelayMs = 5e3;
+    this.verticalLayoutTolerancePx = 2;
+    this.mediaState = signal(createEmptyMedia());
+    this.playerStyleClassState = signal("horizontal-player");
+    this.payload = ctx.payload ?? {};
   }
   onInit() {
-    this.attachResizeObserver(), this.startProgressTicker(), this.initializeMedia();
+    this.attachResizeObserver();
+    this.startProgressTicker();
+    void this.initializeMedia();
   }
-  onUpdate(t) {
-    this.payload = t ?? {}, this.scheduleLayoutRefresh();
+  onUpdate(payload) {
+    this.payload = payload ?? {};
+    this.scheduleLayoutRefresh();
   }
   afterRender() {
-    this.updateProgressElement(), this.applyNowPlayingAnimation(), this.checkTextOverflow(), this.scheduleLayoutRefresh();
+    this.updateProgressElement();
+    this.applyNowPlayingAnimation();
+    this.checkTextOverflow();
+    this.scheduleLayoutRefresh();
   }
   onDestroy() {
-    this.unsubscribeNowPlaying && (this.unsubscribeNowPlaying(), this.unsubscribeNowPlaying = null), this.resizeObserver && (this.resizeObserver.disconnect(), this.resizeObserver = null), this.tickerId && (clearInterval(this.tickerId), this.tickerId = null), this.animationTimeoutId && (clearTimeout(this.animationTimeoutId), this.animationTimeoutId = null), this.inactiveHideTimerId && (clearTimeout(this.inactiveHideTimerId), this.inactiveHideTimerId = null);
+    if (this.unsubscribeNowPlaying) {
+      this.unsubscribeNowPlaying();
+      this.unsubscribeNowPlaying = null;
+    }
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    if (this.tickerId) {
+      clearInterval(this.tickerId);
+      this.tickerId = null;
+    }
+    if (this.animationTimeoutId) {
+      clearTimeout(this.animationTimeoutId);
+      this.animationTimeoutId = null;
+    }
+    if (this.inactiveHideTimerId) {
+      clearTimeout(this.inactiveHideTimerId);
+      this.inactiveHideTimerId = null;
+    }
   }
   showWidget() {
     return !this.autoHide() || this.hasMetadata();
@@ -382,10 +619,10 @@ let tt = class {
     return this.playerStyleClassState();
   }
   hideCover() {
-    return this.booleanConfig("hideCover", !1);
+    return this.booleanConfig("hideCover", false);
   }
   hasMetadata() {
-    return !!this.media().metadata;
+    return Boolean(this.media().metadata);
   }
   artistText() {
     return this.media().metadata?.artist?.trim() || "";
@@ -397,14 +634,18 @@ let tt = class {
     return this.media().metadata?.album?.trim() || "";
   }
   artworkSource() {
-    const t = this.media().metadata;
-    if (!t)
+    const metadata = this.media().metadata;
+    if (!metadata) {
       return "";
-    const a = t.artworkData?.trim() ?? "";
-    return a ? a.startsWith("data:") ? a : `data:image/jpeg;base64,${a}` : t.artworkUrl?.trim() ?? "";
+    }
+    const artworkData = metadata.artworkData?.trim() ?? "";
+    if (artworkData) {
+      return artworkData.startsWith("data:") ? artworkData : `data:image/jpeg;base64,${artworkData}`;
+    }
+    return metadata.artworkUrl?.trim() ?? "";
   }
   showLiveIndicator() {
-    return !!this.media().playback?.isLivestream;
+    return Boolean(this.media().playback?.isLivestream);
   }
   showHorizontalTrack() {
     return this.hasMetadata() && !this.showLiveIndicator() && this.playerStyleClass() === "horizontal-player";
@@ -413,243 +654,303 @@ let tt = class {
     return this.hasMetadata() && !this.showLiveIndicator() && this.playerStyleClass() === "vertical-player";
   }
   progressPercent() {
-    const t = this.currentMedia.metadata?.duration ?? 0, a = this.currentMedia.playback?.position ?? 0;
-    if (!Number.isFinite(t) || t <= 0)
+    const duration = this.currentMedia.metadata?.duration ?? 0;
+    const position = this.currentMedia.playback?.position ?? 0;
+    if (!Number.isFinite(duration) || duration <= 0) {
       return 0;
-    const i = a / t * 100;
-    return Math.max(0, Math.min(100, Math.round(i * 100) / 100));
+    }
+    const rawPercent = position / duration * 100;
+    return Math.max(0, Math.min(100, Math.round(rawPercent * 100) / 100));
+  }
+  showShadows() {
+    return this.booleanConfig("shadow", false);
   }
   media() {
     return this.mediaState();
   }
   autoHide() {
-    return this.booleanConfig("autoHide", !1);
+    return this.booleanConfig("autoHide", false);
   }
   rightAlign() {
-    return this.booleanConfig("rightAlign", !1);
+    return this.booleanConfig("rightAlign", false);
   }
   scrollText() {
-    return this.booleanConfig("scrollText", !1);
+    return this.booleanConfig("scrollText", false);
   }
   orientation() {
-    const t = String(this.config("orientation", "auto")).trim().toLowerCase();
-    return t === "horizontal" || t === "vertical" ? t : "auto";
+    const value = String(this.config("orientation", "auto")).trim().toLowerCase();
+    return value === "horizontal" || value === "vertical" ? value : "auto";
   }
-  config(t, a) {
-    return (this.payload.config ?? {})[t] ?? a;
+  config(key, fallback) {
+    const config = this.payload.config ?? {};
+    return config[key] ?? fallback;
   }
-  booleanConfig(t, a) {
-    return this.config(t, a) === !0;
+  booleanConfig(key, fallback) {
+    const value = this.config(key, fallback);
+    return value === true;
   }
   async initializeMedia() {
     try {
-      this.applyMedia(await Q()), this.unsubscribeNowPlaying = await Z((t) => {
-        this.applyMedia(t);
+      this.applyMedia(await getSystemNowPlaying());
+      this.unsubscribeNowPlaying = await subscribeToSystemNowPlaying((media) => {
+        this.applyMedia(media);
       });
-    } catch (t) {
-      console.error("Failed to initialize Playback Info widget", t);
+    } catch (error) {
+      console.error("Failed to initialize Playback Info widget", error);
     }
   }
-  applyMedia(t) {
-    if (!t.metadata) {
-      this.scheduleInactiveHide(t);
+  applyMedia(media) {
+    if (!media.metadata) {
+      this.scheduleInactiveHide(media);
       return;
     }
-    this.inactiveHideTimerId && (clearTimeout(this.inactiveHideTimerId), this.inactiveHideTimerId = null), this.pendingInactiveMedia = null;
-    const a = this.buildNowPlayingKey(t), i = a !== this.lastNowPlayingKey;
-    i && (this.lastNowPlayingKey = a, a && (this.pendingNowPlayingAnimation = !0));
-    const r = performance.now(), n = this.currentMedia.playback, o = t.playback;
-    if (o) {
-      const s = Number.isFinite(o.position) ? o.position : 0, u = this.derivedPosition(r, this.currentMedia) ?? n?.position ?? 0, c = o.status === "playing" && (o.playbackRate ?? 0) > 0;
-      let h = s;
-      c && !i && (h = Math.max(u, s)), t = {
-        ...t,
+    if (this.inactiveHideTimerId) {
+      clearTimeout(this.inactiveHideTimerId);
+      this.inactiveHideTimerId = null;
+    }
+    this.pendingInactiveMedia = null;
+    const nowPlayingKey = this.buildNowPlayingKey(media);
+    const nowPlayingChanged = nowPlayingKey !== this.lastNowPlayingKey;
+    if (nowPlayingChanged) {
+      this.lastNowPlayingKey = nowPlayingKey;
+      if (nowPlayingKey) {
+        this.pendingNowPlayingAnimation = true;
+      }
+    }
+    const nowMs = performance.now();
+    const currentPlayback = this.currentMedia.playback;
+    const nextPlayback = media.playback;
+    if (nextPlayback) {
+      const incomingPos = Number.isFinite(nextPlayback.position) ? nextPlayback.position : 0;
+      const currentDerived = this.derivedPosition(nowMs, this.currentMedia);
+      const currentPos = currentDerived ?? (currentPlayback?.position ?? 0);
+      const isPlaying = nextPlayback.status === "playing" && (nextPlayback.playbackRate ?? 0) > 0;
+      let acceptedPos = incomingPos;
+      if (isPlaying && !nowPlayingChanged) {
+        acceptedPos = Math.max(currentPos, incomingPos);
+      }
+      media = {
+        ...media,
         playback: {
-          ...o,
-          position: h
+          ...nextPlayback,
+          position: acceptedPos
         }
-      }, this.playbackAnchorAtMs = r, this.playbackAnchorPosition = h, this.lastMonotonicPosition = i ? h : Math.max(this.lastMonotonicPosition, h);
-    } else
-      this.playbackAnchorAtMs = r, this.playbackAnchorPosition = 0, this.lastMonotonicPosition = 0;
-    this.currentMedia = p(t), this.syncMediaState();
+      };
+      this.playbackAnchorAtMs = nowMs;
+      this.playbackAnchorPosition = acceptedPos;
+      this.lastMonotonicPosition = nowPlayingChanged ? acceptedPos : Math.max(this.lastMonotonicPosition, acceptedPos);
+    } else {
+      this.playbackAnchorAtMs = nowMs;
+      this.playbackAnchorPosition = 0;
+      this.lastMonotonicPosition = 0;
+    }
+    this.currentMedia = cloneMedia(media);
+    this.syncMediaState();
   }
-  scheduleInactiveHide(t) {
-    if (this.pendingInactiveMedia = t, !this.currentMedia.metadata) {
-      this.currentMedia = p(t), this.syncMediaState();
+  scheduleInactiveHide(media) {
+    this.pendingInactiveMedia = media;
+    if (!this.currentMedia.metadata) {
+      this.currentMedia = cloneMedia(media);
+      this.syncMediaState();
       return;
     }
-    this.inactiveHideTimerId || (this.inactiveHideTimerId = setTimeout(() => {
-      this.inactiveHideTimerId = null, this.lastNowPlayingKey = "", this.playbackAnchorAtMs = performance.now(), this.playbackAnchorPosition = 0, this.lastMonotonicPosition = 0, this.currentMedia = p(this.pendingInactiveMedia ?? m()), this.pendingInactiveMedia = null, this.syncMediaState();
-    }, this.inactiveHideDelayMs));
+    if (this.inactiveHideTimerId) {
+      return;
+    }
+    this.inactiveHideTimerId = setTimeout(() => {
+      this.inactiveHideTimerId = null;
+      this.lastNowPlayingKey = "";
+      this.playbackAnchorAtMs = performance.now();
+      this.playbackAnchorPosition = 0;
+      this.lastMonotonicPosition = 0;
+      this.currentMedia = cloneMedia(this.pendingInactiveMedia ?? createEmptyMedia());
+      this.pendingInactiveMedia = null;
+      this.syncMediaState();
+    }, this.inactiveHideDelayMs);
   }
-  startProgressTicker(t = 250) {
-    this.lastTickAt = performance.now(), this.tickerId = setInterval(() => {
-      const a = performance.now(), i = (a - this.lastTickAt) / 1e3;
-      this.lastTickAt = a, this.tickProgress(i);
-    }, t);
+  startProgressTicker(intervalMs = 250) {
+    this.lastTickAt = performance.now();
+    this.tickerId = setInterval(() => {
+      const now = performance.now();
+      const deltaSeconds = (now - this.lastTickAt) / 1e3;
+      this.lastTickAt = now;
+      this.tickProgress(deltaSeconds);
+    }, intervalMs);
   }
-  tickProgress(t) {
-    if (t <= 0)
+  tickProgress(deltaSeconds) {
+    if (deltaSeconds <= 0) {
       return;
-    const a = this.currentMedia.playback;
-    if (!a || a.status !== "playing" || (a.playbackRate ?? 0) <= 0)
+    }
+    const playback = this.currentMedia.playback;
+    if (!playback || playback.status !== "playing" || (playback.playbackRate ?? 0) <= 0) {
       return;
-    const i = this.derivedPosition(performance.now(), this.currentMedia);
-    if (i == null)
+    }
+    const nextPosition = this.derivedPosition(performance.now(), this.currentMedia);
+    if (nextPosition == null) {
       return;
-    const r = this.currentMedia.metadata?.duration ?? 0, n = Number.isFinite(r) && r > 0 ? Math.min(r, i) : i;
-    if (Math.abs(n - a.position) < 0.05)
+    }
+    const duration = this.currentMedia.metadata?.duration ?? 0;
+    const clampedPosition = Number.isFinite(duration) && duration > 0 ? Math.min(duration, nextPosition) : nextPosition;
+    if (Math.abs(clampedPosition - playback.position) < 0.05) {
       return;
-    const o = Math.max(this.lastMonotonicPosition, n);
-    this.lastMonotonicPosition = o, this.currentMedia = {
+    }
+    const monotonic = Math.max(this.lastMonotonicPosition, clampedPosition);
+    this.lastMonotonicPosition = monotonic;
+    this.currentMedia = {
       ...this.currentMedia,
       playback: {
-        ...a,
-        position: o
+        ...playback,
+        position: monotonic
       }
-    }, this.updateProgressElement();
+    };
+    this.updateProgressElement();
   }
-  derivedPosition(t, a) {
-    const i = a.playback;
-    if (!i)
+  derivedPosition(nowMs, media) {
+    const playback = media.playback;
+    if (!playback) {
       return null;
-    const r = i.playbackRate ?? 0;
-    if (r <= 0)
-      return i.position ?? 0;
-    if (this.playbackAnchorAtMs <= 0)
-      return this.playbackAnchorAtMs = t, this.playbackAnchorPosition = i.position ?? 0, this.lastMonotonicPosition = this.playbackAnchorPosition, this.playbackAnchorPosition;
-    const n = (t - this.playbackAnchorAtMs) / 1e3;
-    return !Number.isFinite(n) || n < 0 ? i.position ?? 0 : (this.playbackAnchorPosition ?? 0) + n * r;
+    }
+    const rate = playback.playbackRate ?? 0;
+    if (rate <= 0) {
+      return playback.position ?? 0;
+    }
+    if (this.playbackAnchorAtMs <= 0) {
+      this.playbackAnchorAtMs = nowMs;
+      this.playbackAnchorPosition = playback.position ?? 0;
+      this.lastMonotonicPosition = this.playbackAnchorPosition;
+      return this.playbackAnchorPosition;
+    }
+    const deltaSeconds = (nowMs - this.playbackAnchorAtMs) / 1e3;
+    if (!Number.isFinite(deltaSeconds) || deltaSeconds < 0) {
+      return playback.position ?? 0;
+    }
+    return (this.playbackAnchorPosition ?? 0) + deltaSeconds * rate;
   }
-  buildNowPlayingKey(t) {
-    const a = t.metadata;
-    return a ? [
-      a.title ?? "",
-      a.artist ?? "",
-      a.album ?? "",
-      a.artworkUrl ?? "",
-      a.artworkData ?? ""
-    ].join("|") : "";
+  buildNowPlayingKey(media) {
+    const metadata = media.metadata;
+    if (!metadata) {
+      return "";
+    }
+    return [
+      metadata.title ?? "",
+      metadata.artist ?? "",
+      metadata.album ?? "",
+      metadata.artworkUrl ?? "",
+      metadata.artworkData ?? ""
+    ].join("|");
   }
   attachResizeObserver() {
-    if (typeof ResizeObserver > "u") {
+    if (typeof ResizeObserver === "undefined") {
       this.scheduleLayoutRefresh();
       return;
     }
     this.resizeObserver = new ResizeObserver(() => {
       this.scheduleLayoutRefresh();
-    }), this.resizeObserver.observe(this.ctx.mount);
+    });
+    this.resizeObserver.observe(this.ctx.mount);
   }
   scheduleLayoutRefresh() {
     requestAnimationFrame(() => {
-      this.updatePlayerSize(), this.checkTextOverflow(), this.updateProgressElement();
+      this.updatePlayerSize();
+      this.checkTextOverflow();
+      this.updateProgressElement();
     });
   }
   updatePlayerSize() {
-    const t = this.ctx.mount.getBoundingClientRect(), a = Math.round(t.width), i = Math.round(t.height), r = this.resolvePlayerStyleClass(a, i);
-    this.playerStyleClassState() !== r && this.playerStyleClassState.set(r);
-  }
-  resolvePlayerStyleClass(t, a) {
-    const i = this.orientation();
-    return i === "horizontal" ? "horizontal-player" : i === "vertical" ? "vertical-player" : t - a > this.verticalLayoutTolerancePx ? "horizontal-player" : "vertical-player";
-  }
-  applyNowPlayingAnimation() {
-    if (!this.pendingNowPlayingAnimation)
-      return;
-    const t = this.ctx.mount.querySelector('[data-role="now-playing"]');
-    t && (this.pendingNowPlayingAnimation = !1, t.classList.remove("now-playing-change"), t.getBoundingClientRect(), t.classList.add("now-playing-change"), this.animationTimeoutId && clearTimeout(this.animationTimeoutId), this.animationTimeoutId = setTimeout(() => {
-      t.classList.remove("now-playing-change"), this.animationTimeoutId = null;
-    }, 420));
-  }
-  checkTextOverflow() {
-    this.updateOverflowState('[data-role="artist"]'), this.updateOverflowState('[data-role="title"]');
-  }
-  updateOverflowState(t) {
-    const a = this.ctx.mount.querySelector(t);
-    if (!a)
-      return;
-    const i = a.querySelector("span"), n = this.scrollText() && a.scrollWidth > a.clientWidth;
-    if (a.classList.toggle("scrolling", n), !!i) {
-      if (n) {
-        i.style.setProperty("--scroll-amount", `${a.clientWidth - a.scrollWidth}px`);
-        return;
-      }
-      i.style.removeProperty("--scroll-amount");
+    const rect = this.ctx.mount.getBoundingClientRect();
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    const nextClass = this.resolvePlayerStyleClass(width, height);
+    if (this.playerStyleClassState() !== nextClass) {
+      this.playerStyleClassState.set(nextClass);
     }
   }
+  resolvePlayerStyleClass(width, height) {
+    const orientation = this.orientation();
+    if (orientation === "horizontal") {
+      return "horizontal-player";
+    }
+    if (orientation === "vertical") {
+      return "vertical-player";
+    }
+    return width - height > this.verticalLayoutTolerancePx ? "horizontal-player" : "vertical-player";
+  }
+  applyNowPlayingAnimation() {
+    if (!this.pendingNowPlayingAnimation) {
+      return;
+    }
+    const element = this.ctx.mount.querySelector('[data-role="now-playing"]');
+    if (!element) {
+      return;
+    }
+    this.pendingNowPlayingAnimation = false;
+    element.classList.remove("now-playing-change");
+    void element.getBoundingClientRect();
+    element.classList.add("now-playing-change");
+    if (this.animationTimeoutId) {
+      clearTimeout(this.animationTimeoutId);
+    }
+    this.animationTimeoutId = setTimeout(() => {
+      element.classList.remove("now-playing-change");
+      this.animationTimeoutId = null;
+    }, 420);
+  }
+  checkTextOverflow() {
+    this.updateOverflowState('[data-role="artist"]');
+    this.updateOverflowState('[data-role="title"]');
+  }
+  updateOverflowState(selector) {
+    const element = this.ctx.mount.querySelector(selector);
+    if (!element) {
+      return;
+    }
+    const child = element.querySelector("span");
+    const enableScrolling = this.scrollText();
+    const isOverflowing = enableScrolling && element.scrollWidth > element.clientWidth;
+    element.classList.toggle("scrolling", isOverflowing);
+    if (!child) {
+      return;
+    }
+    if (isOverflowing) {
+      child.style.setProperty("--scroll-amount", `${element.clientWidth - element.scrollWidth}px`);
+      return;
+    }
+    child.style.removeProperty("--scroll-amount");
+  }
   updateProgressElement() {
-    const t = this.ctx.mount.querySelector('[data-role="progress"]');
-    t && (t.style.width = `${this.progressPercent()}%`);
+    const progress = this.ctx.mount.querySelector('[data-role="progress"]');
+    if (!progress) {
+      return;
+    }
+    progress.style.width = `${this.progressPercent()}%`;
   }
   syncMediaState() {
-    const t = this.mediaState();
-    this.isRenderableMediaEqual(t, this.currentMedia) || this.mediaState.set(p(this.currentMedia));
+    const currentState = this.mediaState();
+    if (this.isRenderableMediaEqual(currentState, this.currentMedia)) {
+      return;
+    }
+    this.mediaState.set(cloneMedia(this.currentMedia));
   }
-  isRenderableMediaEqual(t, a) {
-    const i = t.metadata, r = a.metadata;
-    return !i && !r ? !0 : !i || !r ? !1 : (t.app ?? "") === (a.app ?? "") && i.title === r.title && (i.artist ?? "") === (r.artist ?? "") && (i.album ?? "") === (r.album ?? "") && (i.artworkUrl ?? "") === (r.artworkUrl ?? "") && (i.artworkData ?? "") === (r.artworkData ?? "") && (i.duration ?? 0) === (r.duration ?? 0) && !!t.playback?.isLivestream == !!a.playback?.isLivestream;
+  isRenderableMediaEqual(left, right) {
+    const leftMetadata = left.metadata;
+    const rightMetadata = right.metadata;
+    if (!leftMetadata && !rightMetadata) {
+      return true;
+    }
+    if (!leftMetadata || !rightMetadata) {
+      return false;
+    }
+    return (left.app ?? "") === (right.app ?? "") && leftMetadata.title === rightMetadata.title && (leftMetadata.artist ?? "") === (rightMetadata.artist ?? "") && (leftMetadata.album ?? "") === (rightMetadata.album ?? "") && (leftMetadata.artworkUrl ?? "") === (rightMetadata.artworkUrl ?? "") && (leftMetadata.artworkData ?? "") === (rightMetadata.artworkData ?? "") && (leftMetadata.duration ?? 0) === (rightMetadata.duration ?? 0) && Boolean(left.playback?.isLivestream) === Boolean(right.playback?.isLivestream);
   }
 };
-const et = `{{#if showWidget()}}
-  <div class="{{ playerClass() }}">
-    <div data-role="now-playing" class="now-playing">
-      {{#if !hideCover()}}
-        <div class="cover-shell">
-          {{#if artworkSource()}}
-            <div class="backdrop">
-              <img src="{{ artworkSource() }}" alt="Album Cover">
-            </div>
-          {{/if}}
-          <div class="cover">
-            {{#if artworkSource()}}
-              <img class="cover-image" src="{{ artworkSource() }}" alt="Album Cover">
-            {{/if}}
-            {{#if !artworkSource()}}
-              <div class="no-cover">
-                <i class="lni lnis-volume-high"></i>
-              </div>
-            {{/if}}
-          </div>
-        </div>
-      {{/if}}
-
-      <div class="details">
-        {{#if hasMetadata()}}
-          <div data-role="artist" class="artist">
-            <span>{{ artistText() }}</span>
-          </div>
-          <div data-role="title" class="title">
-            <span>{{ titleText() }}</span>
-          </div>
-          <div class="album">{{ albumText() }}</div>
-
-          {{#if showLiveIndicator()}}
-            <div class="live">Live <span></span></div>
-          {{/if}}
-
-          {{#if showHorizontalTrack()}}
-            <div class="track inline-track">
-              <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>
-            </div>
-          {{/if}}
-        {{/if}}
-
-        {{#if !hasMetadata()}}
-          <div class="title no-metadata"><span>Nothing playing</span></div>
-        {{/if}}
-      </div>
-    </div>
-
-    {{#if showVerticalTrack()}}
-      <div class="track block-track">
-        <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>
-      </div>
-    {{/if}}
-  </div>
-{{/if}}
-`, it = ".playback-info{display:flex;flex-direction:column;justify-content:center;width:100%;height:100%;color:var(--color-text);overflow:hidden;font-size:clamp(.9rem,var(--host-height, 240px) / 9,1.4rem)}.playback-info .now-playing{display:flex;align-items:center;gap:.1em;width:100%;min-height:0}.playback-info .cover-shell{--cover-size: min(28cqw, calc(var(--host-height, 240px) / 2.5));--cover-blur-padding: clamp(1rem, calc(var(--host-height, 240px) / 9.5), 1.5rem);--cover-glow-room: clamp(.55rem, calc(var(--host-height, 240px) / 16), .9rem);--cover-room-block: calc(var(--cover-blur-padding) + var(--cover-glow-room));--cover-room-inline-start: var(--cover-room-block);--cover-room-inline-end: var(--cover-room-block);--cover-shell-width: min( 100%, calc(var(--cover-size) + var(--cover-room-inline-start) + var(--cover-room-inline-end)) );position:relative;flex:0 0 auto;width:var(--cover-shell-width);height:min(100%,var(--cover-size) + var(--cover-room-block) * 2);box-sizing:border-box;isolation:isolate}.playback-info .cover{position:relative;display:flex;width:calc(100% - var(--cover-room-inline-start) - var(--cover-room-inline-end));height:calc(100% - var(--cover-room-block) * 2);margin-block:var(--cover-room-block);margin-inline-start:var(--cover-room-inline-start);margin-inline-end:var(--cover-room-inline-end);min-width:0;min-height:0;aspect-ratio:1/1;background:rgb(from var(--color-primary) r g b/.12);border-radius:.6em;overflow:hidden;box-sizing:border-box;z-index:2}.playback-info .backdrop{position:absolute;top:var(--cover-room-block);left:var(--cover-room-inline-start);width:calc(100% - var(--cover-room-inline-start) - var(--cover-room-inline-end));height:calc(100% - var(--cover-room-block) * 2);z-index:1;opacity:.92;filter:blur(.65em) saturate(2.1) brightness(1.16);pointer-events:none}.playback-info .backdrop img,.playback-info .cover-image{width:100%;height:100%;border-radius:.6em;object-fit:cover;display:block;box-sizing:border-box}.playback-info .cover-image{border:.18em solid rgb(from var(--color-text) r g b/.14);box-shadow:0 .8em 1.8em #00000038}.playback-info .backdrop img{transform:scale(1.02)}.playback-info .no-cover{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:.6em;background:radial-gradient(circle at top,rgb(from var(--color-primary) r g b/.35),transparent 65%),linear-gradient(135deg,rgb(from var(--color-primary) r g b/.28),rgb(from var(--color-primary) r g b/.58));border:.18em solid rgb(from var(--color-text) r g b/.14);box-shadow:0 .8em 1.8em #0000002e;box-sizing:border-box}.playback-info .no-cover i{font-size:clamp(2rem,var(--host-width, 320px) / 8,3.4rem);opacity:.92}.playback-info .details{display:flex;flex:1 1 0;min-width:0;flex-direction:column;justify-content:center;text-shadow:0 .08em .18em rgba(0,0,0,.3)}.playback-info .artist,.playback-info .title,.playback-info .album,.playback-info .live{width:100%;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-transform:uppercase;line-height:1.05}.playback-info .artist,.playback-info .title{text-overflow:clip}.playback-info .artist span,.playback-info .title span{display:inline-block;opacity:1}.playback-info .artist.scrolling span,.playback-info .title.scrolling span{white-space:nowrap;animation:playback-scroll-fade 10s linear infinite;animation-delay:2s;animation-fill-mode:both;will-change:transform,opacity}.playback-info .artist{opacity:.8;font-size:1.1em;font-weight:300}.playback-info .title{font-size:1.28em;font-weight:700;margin-top:.06em}.playback-info .title.no-metadata{white-space:wrap}.playback-info .album{margin-top:.14em;opacity:.48;font-size:.82em;font-weight:300}.playback-info .live{display:flex;align-items:center;gap:.45em;margin-top:.5em;color:#ff7070;font-size:.82em;font-weight:700}.playback-info .live span{display:inline-block;width:.7em;height:.7em;border-radius:999px;background:currentColor;animation:playback-pulse .75s ease-out infinite alternate}.playback-info .track{width:100%;height:.55em;border-radius:999px;overflow:hidden;background:rgb(from var(--color-primary) r g b/.22)}.playback-info .inline-track,.playback-info .block-track{margin-top:.8em}.playback-info .progress{height:100%;background:linear-gradient(90deg,rgb(from var(--color-primary) r g b/.82),var(--color-primary));transition:width .22s linear}.playback-info.align-right .details{text-align:right;align-items:flex-end}.playback-info.align-right .live{justify-content:flex-end}.playback-info.horizontal-player .now-playing{flex-direction:row;justify-content:center}.playback-info.horizontal-player .details{flex:0 1 auto;width:min(32rem,100% - var(--cover-shell-width) - .1em);max-width:calc(100% - var(--cover-shell-width) - .1em)}.playback-info.horizontal-player .cover-shell{--cover-room-inline-start: calc(var(--cover-room-block) * 1.15);--cover-room-inline-end: calc(var(--cover-room-block) * .45)}.playback-info.horizontal-player.align-right .cover-shell{--cover-room-inline-start: calc(var(--cover-room-block) * .45);--cover-room-inline-end: calc(var(--cover-room-block) * 1.15)}.playback-info.horizontal-player.align-right .now-playing{flex-direction:row-reverse}.playback-info.vertical-player{align-items:center}.playback-info.vertical-player .now-playing{flex-direction:column;justify-content:center;text-align:center}.playback-info.vertical-player .cover-shell{--cover-size: min(44cqw, calc(var(--host-height, 240px) / 2.25))}.playback-info.vertical-player .details{width:100%;align-items:center;text-align:center}.playback-info.vertical-player .artist,.playback-info.vertical-player .title,.playback-info.vertical-player .album,.playback-info.vertical-player .live{text-align:center}.playback-info.vertical-player .live{justify-content:center}.playback-info.vertical-player.align-right .details,.playback-info.vertical-player.align-right .artist,.playback-info.vertical-player.align-right .title,.playback-info.vertical-player.align-right .album,.playback-info.vertical-player.align-right .live{text-align:center}.playback-info.vertical-player.align-right .live{justify-content:center}.playback-info .now-playing.now-playing-change{animation:playback-pop-in .42s ease-out}@keyframes playback-scroll-fade{0%,10%{transform:translate(0);opacity:1}70%,80%{transform:translate(var(--scroll-amount, -100px));opacity:1}85%{transform:translate(var(--scroll-amount, -100px));opacity:0}85.01%{transform:translate(0);opacity:0}to{transform:translate(0);opacity:1}}@keyframes playback-pulse{0%{opacity:.55;transform:scale(.86)}to{opacity:1;transform:scale(1)}}@keyframes playback-pop-in{0%{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}", L = Y(tt, { template: et, styles: it }), at = L, ot = { DisplayDuckWidget: L, Widget: at };
+const template = '{{#if showWidget()}}\n  <div class="{{ playerClass() }}">\n    <div data-role="now-playing" class="now-playing">\n      {{#if !hideCover() && artworkSource() }}\n        <div class="cover-shell">\n          <div class="backdrop">\n            <img src="{{ artworkSource() }}" alt="Album Cover">\n          </div>\n          <div class="cover">\n            <img class="cover-image" src="{{ artworkSource() }}" alt="Album Cover">\n          </div>\n        </div>\n      {{/if}}\n\n      <div class="details  {{#if showShadows()}}shadows{{/if}}">\n        {{#if hasMetadata()}}\n          <div data-role="artist" class="artist">\n            <span>{{ artistText() }}</span>\n          </div>\n          <div data-role="title" class="title">\n            <span>{{ titleText() }}</span>\n          </div>\n          <div class="album">{{ albumText() }}</div>\n\n          {{#if showLiveIndicator()}}\n            <div class="live">Live <span></span></div>\n          {{/if}}\n\n          {{#if showHorizontalTrack()}}\n            <div class="track inline-track">\n              <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>\n            </div>\n          {{/if}}\n        {{/if}}\n\n        {{#if !hasMetadata()}}\n          <div class="title no-metadata"><span>Nothing playing</span></div>\n        {{/if}}\n      </div>\n    </div>\n\n    {{#if showVerticalTrack()}}\n      <div class="track block-track">\n        <div data-role="progress" class="progress" style="width: {{ progressPercent() }}%;"></div>\n      </div>\n    {{/if}}\n  </div>\n{{/if}}\n';
+const styles = ".playback-info {\n  display: flex;\n  flex-direction: column;\n  justify-content: center;\n  width: 100%;\n  height: 100%;\n  color: var(--color-text);\n  overflow: hidden;\n  font-size: clamp(0.9rem, var(--host-height, 240px) / 9, 1.4rem);\n}\n.playback-info .now-playing {\n  display: flex;\n  align-items: center;\n  gap: 0.1em;\n  width: 100%;\n  min-height: 0;\n}\n.playback-info .cover-shell {\n  --cover-size: min(28cqw, calc(var(--host-height, 240px) / 2.5));\n  --cover-blur-padding: clamp(1rem, calc(var(--host-height, 240px) / 9.5), 1.5rem);\n  --cover-glow-room: clamp(0.55rem, calc(var(--host-height, 240px) / 16), 0.9rem);\n  --cover-room-block: calc(var(--cover-blur-padding) + var(--cover-glow-room));\n  --cover-room-inline-start: var(--cover-room-block);\n  --cover-room-inline-end: var(--cover-room-block);\n  --cover-shell-width: min(\n    100%,\n    calc(var(--cover-size) + var(--cover-room-inline-start) + var(--cover-room-inline-end))\n  );\n  position: relative;\n  flex: 0 0 auto;\n  width: var(--cover-shell-width);\n  height: min(100%, var(--cover-size) + var(--cover-room-block) * 2);\n  box-sizing: border-box;\n  isolation: isolate;\n}\n.playback-info .cover {\n  position: relative;\n  display: flex;\n  width: calc(100% - var(--cover-room-inline-start) - var(--cover-room-inline-end));\n  height: calc(100% - var(--cover-room-block) * 2);\n  margin-block: var(--cover-room-block);\n  margin-inline-start: var(--cover-room-inline-start);\n  margin-inline-end: var(--cover-room-inline-end);\n  min-width: 0;\n  min-height: 0;\n  aspect-ratio: 1/1;\n  background: rgb(from var(--color-primary) r g b/0.12);\n  border-radius: 0.6em;\n  overflow: hidden;\n  box-sizing: border-box;\n  z-index: 2;\n}\n.playback-info .backdrop {\n  position: absolute;\n  top: var(--cover-room-block);\n  left: var(--cover-room-inline-start);\n  width: calc(100% - var(--cover-room-inline-start) - var(--cover-room-inline-end));\n  height: calc(100% - var(--cover-room-block) * 2);\n  z-index: 1;\n  opacity: 0.92;\n  filter: blur(0.65em) saturate(2.1) brightness(1.16);\n  pointer-events: none;\n}\n.playback-info .backdrop img,\n.playback-info .cover-image {\n  width: 100%;\n  height: 100%;\n  border-radius: 0.6em;\n  object-fit: cover;\n  display: block;\n  box-sizing: border-box;\n}\n.playback-info .cover-image {\n  border: 0.18em solid rgb(from var(--color-text) r g b/0.14);\n  box-shadow: 0 0.8em 1.8em rgba(0, 0, 0, 0.22);\n}\n.playback-info .backdrop img {\n  transform: scale(1.02);\n}\n.playback-info .no-cover {\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  width: 100%;\n  height: 100%;\n  border-radius: 0.6em;\n  background: radial-gradient(circle at top, rgb(from var(--color-primary) r g b/0.35), transparent 65%), linear-gradient(135deg, rgb(from var(--color-primary) r g b/0.28), rgb(from var(--color-primary) r g b/0.58));\n  border: 0.18em solid rgb(from var(--color-text) r g b/0.14);\n  box-shadow: 0 0.8em 1.8em rgba(0, 0, 0, 0.18);\n  box-sizing: border-box;\n}\n.playback-info .no-cover i {\n  font-size: clamp(2rem, var(--host-width, 320px) / 8, 3.4rem);\n  opacity: 0.92;\n}\n.playback-info .details {\n  display: flex;\n  flex: 1 1 0;\n  min-width: 0;\n  flex-direction: column;\n  justify-content: center;\n}\n.playback-info .details.shadows {\n  filter: drop-shadow(-1px 1px 1px #000000);\n}\n.playback-info .artist,\n.playback-info .title,\n.playback-info .album,\n.playback-info .live {\n  width: 100%;\n  min-width: 0;\n  overflow: hidden;\n  white-space: nowrap;\n  text-overflow: ellipsis;\n  text-transform: uppercase;\n  line-height: 1.05;\n}\n.playback-info .artist,\n.playback-info .title {\n  text-overflow: clip;\n}\n.playback-info .artist span,\n.playback-info .title span {\n  display: inline-block;\n  opacity: 1;\n}\n.playback-info .artist.scrolling span,\n.playback-info .title.scrolling span {\n  white-space: nowrap;\n  animation: playback-scroll-fade 10s linear infinite;\n  animation-delay: 2s;\n  animation-fill-mode: both;\n  will-change: transform, opacity;\n}\n.playback-info .artist {\n  opacity: 0.8;\n  font-size: 1.1em;\n  font-weight: 300;\n}\n.playback-info .title {\n  font-size: 1.28em;\n  font-weight: 700;\n  margin-top: 0.06em;\n}\n.playback-info .title.no-metadata {\n  white-space: wrap;\n}\n.playback-info .album {\n  margin-top: 0.14em;\n  opacity: 0.48;\n  font-size: 0.82em;\n  font-weight: 300;\n}\n.playback-info .live {\n  display: flex;\n  align-items: center;\n  gap: 0.45em;\n  margin-top: 0.5em;\n  color: rgb(255, 112, 112);\n  font-size: 0.82em;\n  font-weight: 700;\n}\n.playback-info .live span {\n  display: inline-block;\n  width: 0.7em;\n  height: 0.7em;\n  border-radius: 999px;\n  background: currentColor;\n  animation: playback-pulse 0.75s ease-out infinite alternate;\n}\n.playback-info .track {\n  width: 100%;\n  height: 0.55em;\n  border-radius: 0.15em;\n  overflow: hidden;\n  background: rgb(from var(--color-primary) calc(r * 2) calc(g * 2) calc(b * 2));\n}\n.playback-info .inline-track {\n  margin-top: 0.8em;\n}\n.playback-info .block-track {\n  margin-top: 0.8em;\n}\n.playback-info .progress {\n  height: 100%;\n  background: linear-gradient(90deg, rgb(from var(--color-primary) r g b/0.82), var(--color-primary));\n  transition: width 0.22s linear;\n}\n.playback-info.align-right .details {\n  text-align: right;\n  align-items: flex-end;\n}\n.playback-info.align-right .live {\n  justify-content: flex-end;\n}\n.playback-info.horizontal-player .now-playing {\n  flex-direction: row;\n  justify-content: center;\n}\n.playback-info.horizontal-player .details {\n  flex: 1 1 auto;\n  width: min(32rem, 100% - var(--cover-shell-width) - 0.1em);\n  max-width: calc(100% - var(--cover-shell-width) - 0.1em);\n}\n.playback-info.horizontal-player .cover-shell {\n  --cover-room-inline-start: calc(var(--cover-room-block) * 1.15);\n  --cover-room-inline-end: calc(var(--cover-room-block) * 0.45);\n}\n.playback-info.horizontal-player.align-right .cover-shell {\n  --cover-room-inline-start: calc(var(--cover-room-block) * 0.45);\n  --cover-room-inline-end: calc(var(--cover-room-block) * 1.15);\n}\n.playback-info.horizontal-player.align-right .now-playing {\n  flex-direction: row-reverse;\n}\n.playback-info.vertical-player {\n  align-items: center;\n}\n.playback-info.vertical-player .now-playing {\n  flex-direction: column;\n  justify-content: center;\n  text-align: center;\n}\n.playback-info.vertical-player .cover-shell {\n  --cover-size: min(44cqw, calc(var(--host-height, 240px) / 2.25));\n}\n.playback-info.vertical-player .details {\n  width: 100%;\n  align-items: center;\n  text-align: center;\n}\n.playback-info.vertical-player .artist,\n.playback-info.vertical-player .title,\n.playback-info.vertical-player .album,\n.playback-info.vertical-player .live {\n  text-align: center;\n}\n.playback-info.vertical-player .live {\n  justify-content: center;\n}\n.playback-info.vertical-player.align-right .details,\n.playback-info.vertical-player.align-right .artist,\n.playback-info.vertical-player.align-right .title,\n.playback-info.vertical-player.align-right .album,\n.playback-info.vertical-player.align-right .live {\n  text-align: center;\n}\n.playback-info.vertical-player.align-right .live {\n  justify-content: center;\n}\n\n.playback-info .now-playing.now-playing-change {\n  animation: playback-pop-in 0.42s ease-out;\n}\n\n@keyframes playback-scroll-fade {\n  0%, 10% {\n    transform: translateX(0);\n    opacity: 1;\n  }\n  70%, 80% {\n    transform: translateX(var(--scroll-amount, -100px));\n    opacity: 1;\n  }\n  85% {\n    transform: translateX(var(--scroll-amount, -100px));\n    opacity: 0;\n  }\n  85.01% {\n    transform: translateX(0);\n    opacity: 0;\n  }\n  100% {\n    transform: translateX(0);\n    opacity: 1;\n  }\n}\n@keyframes playback-pulse {\n  from {\n    opacity: 0.55;\n    transform: scale(0.86);\n  }\n  to {\n    opacity: 1;\n    transform: scale(1);\n  }\n}\n@keyframes playback-pop-in {\n  0% {\n    opacity: 0;\n    transform: scale(0.96);\n  }\n  100% {\n    opacity: 1;\n    transform: scale(1);\n  }\n}";
+const DisplayDuckWidget2 = createWidgetClass(DisplayDuckWidget$1, { template, styles });
+const Widget = DisplayDuckWidget2;
+const displayduckPackPlaybackInfo_playbackInfo_entry = { DisplayDuckWidget: DisplayDuckWidget2, Widget };
 export {
-  L as DisplayDuckWidget,
-  at as Widget,
-  ot as default
+  DisplayDuckWidget2 as DisplayDuckWidget,
+  Widget,
+  displayduckPackPlaybackInfo_playbackInfo_entry as default
 };
+//# sourceMappingURL=playback-info.js.map
